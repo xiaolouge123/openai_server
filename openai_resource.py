@@ -64,6 +64,9 @@ class ChatResponse(BaseModel):
 
     def get_generation_text(self):
         return self.choices[0].message.content
+    
+    def __str__(self) -> str:
+        return json.dumps(self.model_dump(mode="json"), ensure_ascii=False)
 
 
 class Chunk(BaseModel):
@@ -81,7 +84,7 @@ class ChatResponseChunk(BaseModel):
 
 
 @proxy(enable=ENABLE_PROXY)
-@key(Handlers.get_key_handler())  # insert apikey
+@key(Handlers.get_key_handler)
 async def get_models(**kwargs):
     session = await SingletonClientSession.get_session()
     async with session.get(
@@ -97,8 +100,8 @@ async def get_models(**kwargs):
 
 
 @proxy(enable=ENABLE_PROXY)
-@key(Handlers.get_key_handler())
-@record_tokens(Handlers.get_record_handler())  #
+@key(Handlers.get_key_handler)
+@record_tokens(Handlers.get_record_handler)
 async def get_chat_completion(chat_request: ChatRequest, **kwargs) -> ChatResponse:
     timeout = aiohttp.ClientTimeout(total=60)
     session = await SingletonClientSession.get_session()

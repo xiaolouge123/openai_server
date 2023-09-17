@@ -68,17 +68,19 @@ class RecordHandler:
         model_name,
         request_body,
         prompt_token_num,
+        generation,
         generation_token_num,
     ):
         async with self.pool.acquire() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
-                    "INSERT INTO RequestRecords SET apiKey = %s, modelName = %s, request_body = %s, prompt_token_count = %s, generation_token_count = %s",
+                    "INSERT INTO RequestRecords SET apiKey = %s, modelName = %s, request_body = %s, prompt_token_count = %s, generation_response = %s, generation_token_count = %s",
                     (
                         api_key,
                         model_name,
                         request_body,
                         prompt_token_num,
+                        generation,
                         generation_token_num,
                     ),
                 )
@@ -181,7 +183,7 @@ def record_tokens(handler_coro):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            handler = await handler_coro
+            handler = await handler_coro()
             req = args[0]
             if isinstance(req, dict):
                 model_name = req["model"]
@@ -201,7 +203,12 @@ def record_tokens(handler_coro):
                     model_name, response.get_generation_text()
                 )
             await handler.record_tokens(
-                api_key, model_name, str(req), prompt_tokens, generation_tokens
+                api_key,
+                model_name,
+                str(req),
+                prompt_tokens,
+                str(response),
+                generation_tokens,
             )
             return response
 
@@ -214,7 +221,7 @@ def key(handler_coro):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
-            handler = await handler_coro
+            handler = await handler_coro()
             logger.info(handler)
             apikey = handler.get_key()
 
