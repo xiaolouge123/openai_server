@@ -9,7 +9,7 @@ from aiohttp_sse_client import client as sse_client
 
 from utils import SingletonClientSession
 from exceptions import OpenaiApiException
-from helper import Handlers, key, record_tokens, proxy
+from helper import Handlers, key, record_tokens, proxy, retry
 
 ENABLE_PROXY = os.environ.get("ENABLE_PROXY", True)
 
@@ -64,7 +64,7 @@ class ChatResponse(BaseModel):
 
     def get_generation_text(self):
         return self.choices[0].message.content
-    
+
     def __str__(self) -> str:
         return json.dumps(self.model_dump(mode="json"), ensure_ascii=False)
 
@@ -106,19 +106,22 @@ async def get_chat_completion(chat_request: ChatRequest, **kwargs) -> ChatRespon
     timeout = aiohttp.ClientTimeout(total=60)
     session = await SingletonClientSession.get_session()
     # logger.info(chat_request.model_dump(mode='json'))
-    async with session.post(
-        "https://api.openai.com/v1/chat/completions",
-        proxy=kwargs.pop("proxy"),
-        headers=kwargs.pop("headers"),
-        json=chat_request.model_dump(mode="json"),
-        timeout=timeout,
-    ) as resp:
-        if resp.status != 200:
-            # raise OpenaiApiException(msg=resp.text, status_code=resp.status)
-            print(resp.status, resp.text)
-        completion = await resp.json()
-        # logger.info(completion)
-        return ChatResponse(**completion)
+    try:
+        async with session.post(
+            "https://api.openai.com/v1/chat/completions",
+            proxy=kwargs.pop("proxy"),
+            headers=kwargs.pop("headers"),
+            json=chat_request.model_dump(mode="json"),
+            timeout=timeout,
+        ) as resp:
+            if resp.status != 200:
+                # raise OpenaiApiException(msg=resp.text, status_code=resp.status)
+                print(resp.status, resp.text)
+            completion = await resp.json()
+            # logger.info(completion)
+            return ChatResponse(**completion)
+    except Exception as e:
+        logger.warning(e)
 
 
 async def get_chat_completion_stream(
