@@ -2,6 +2,7 @@ import os
 import time
 import aiomysql
 import asyncio
+import random
 from collections import OrderedDict
 from functools import wraps
 import tiktoken
@@ -17,7 +18,7 @@ DB_NAME = os.environ.get("DB_NAME", "OpenAIUsage")
 
 
 def get_time():
-    return int(time.time())
+    return time.time()
 
 
 class Handlers:
@@ -94,6 +95,7 @@ class KeyPoolHandler:
         self.call_limit = 3  # 3 requests per minute
         self.call_interval = 60  # 60 seconds
         self.last_key_index = 0
+        self.lock = asyncio.Lock()
 
     async def async_init(self):
         self.keypool = await self.get_all_keys()
@@ -110,46 +112,62 @@ class KeyPoolHandler:
                     keys_dict[row[0]] = {
                         "comment": row[1],
                         "available": row[2],
-                        "usage_count": 0,
+                        "usage_queue": [],
                         "usage_limit": row[3],
-                        "in_last_min": get_time(),
                     }
                 logger.info("KeyPool Initializing")
+                # logger.info(keys_dict)
                 return keys_dict
 
-    def get_key(self):
+    async def get_key(self):
         keys = list(self.keypool.keys())
-        start_index = self.last_key_index
+        if len(keys) > 4:
+            start_index = random.randint(0, len(keys) - 1)
+        else:
+            start_index = self.last_key_index
+
+        # self.last_key_index = start_index
         cnt = 0
         while True:
-            api_key = keys[self.last_key_index]
-            key_data = self.keypool[api_key]
-            current_time = get_time()
-            if self._check_key(key_data, current_time=current_time):
-                self.last_key_index = start_index
-                return api_key
-            else:
-                self.last_key_index = (self.last_key_index + 1) % len(keys)
-                cnt += 1
-                if cnt == len(keys):
-                    raise NoValidKey(
-                        f"To many loop, No available key in {len(keys)} key pool"
-                    )
+            async with self.lock:
+                # only one can get self.keypool
+                api_key = keys[start_index]
+                key_data = self.keypool[api_key]
+                current_time = get_time()
+                if self._check_key(key_data, current_time=current_time):
+                    self.last_key_index = start_index
+                    return api_key
+                else:
+                    start_index = (start_index + 1) % len(keys)
+                    cnt += 1
+                    if cnt == len(keys):
+                        raise NoValidKey(
+                            f"To many loop, No available key in {len(keys)} key pool"
+                        )
 
     def _check_key(self, key_info, **kwargs):
-        if key_info["available"] is False:
-            return False
         current_time = kwargs.get("current_time", get_time())
-        if current_time - key_info["in_last_min"] <= self.call_interval:
-            if key_info["usage_count"] >= key_info["usage_limit"]:
-                return False
-            else:
-                key_info["usage_count"] += 1
-                return True
-        else:
-            key_info["usage_count"] = 1
-            key_info["in_last_min"] = current_time
+        if not key_info["available"]:
+            return False
+        if len(key_info["usage_queue"]) < key_info["usage_limit"]:
+            # queue not full
             return True
+        elif (
+            len(key_info["timestamps"]) == key_info["request_limit"]
+            and current_time - key_info["timestamps"][0] > self.call_interval
+        ):
+            # queue full but the first call extend interval
+            key_info["timestamps"].pop(0)
+            key_info["timestamps"].append(current_time)
+            return True
+        elif (
+            len(key_info["timestamps"]) == key_info["request_limit"]
+            and current_time - key_info["timestamps"][0] <= self.call_interval
+        ):
+            # queue full and the first call not extend interval
+            return False
+        else:
+            return False
 
     async def set_key_status(self, api_key, available, comment):
         async with self.pool.acquire() as conn:
@@ -223,7 +241,7 @@ def key(handler_coro):
         async def wrapper(*args, **kwargs):
             handler = await handler_coro()
             logger.info(handler)
-            apikey = handler.get_key()
+            apikey = await handler.get_key()
 
             headers = {
                 "Authorization": "Bearer " + apikey,
@@ -250,6 +268,26 @@ def proxy(enable=True):
                 kwargs["proxy"] = None
             response = func(*args, **kwargs)
             return response
+
+        return wrapper
+
+    return decorator
+
+
+def retry(times=5):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            apikey = kwargs.get("apikey", None)
+            for i in range(times):
+                try:
+                    response = func(*args, **kwargs)
+                    return response
+                except NoValidKey as e:
+                    logger.warning(f"{apikey} is not available")
+                    time.sleep(20)
+                    continue
+            raise Exception("Retry times exceeded")
 
         return wrapper
 
